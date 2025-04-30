@@ -33,4 +33,4 @@ def make_robot_config(robot_type: str, **kwargs) -> RobotConfig:
 
 def make_robot_from_config(config: RobotConfig):
     if isinstance(config, ManipulatorRobotConfig):
-        from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
+        from fermbot.common.robot_devices.robots.manipulator import ManipulatorRobot
