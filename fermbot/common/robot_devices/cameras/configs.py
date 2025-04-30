@@ -27,7 +27,7 @@ class OpenCVCameraConfig(CameraConfig):
     fps: int | None = None
     width: int | None = None
     height: int | None = None
-    color_mode: str = "bgr"
+    color_mode: str = "rgb"
     channels: int | None = None
     rotation: int | None = None
     mock: bool = False
@@ -59,39 +59,22 @@ class IntelRealSenseCameraConfig(CameraConfig):
     ```
     """
 
-    name: str | None = None
-    serial_number: int | None = None
+    camera_index: int
     fps: int | None = None
     width: int | None = None
     height: int | None = None
     color_mode: str = "rgb"
     channels: int | None = None
-    use_depth: bool = False
-    force_hardware_reset: bool = True
     rotation: int | None = None
     mock: bool = False
 
     def __post_init__(self):
-        # bool is stronger than is None, since it works with empty strings
-        if bool(self.name) and bool(self.serial_number):
-            raise ValueError(
-                f"One of them must be set: name or serial_number, but {self.name=} and {self.serial_number=} provided."
-            )
-
         if self.color_mode not in ["rgb", "bgr"]:
             raise ValueError(
                 f"`color_mode` is expected to be 'rgb' or 'bgr', but {self.color_mode} is provided."
             )
 
         self.channels = 3
-
-        at_least_one_is_not_none = self.fps is not None or self.width is not None or self.height is not None
-        at_least_one_is_none = self.fps is None or self.width is None or self.height is None
-        if at_least_one_is_not_none and at_least_one_is_none:
-            raise ValueError(
-                "For `fps`, `width` and `height`, either all of them need to be set, or none of them, "
-                f"but {self.fps=}, {self.width=}, {self.height=} were provided."
-            )
 
         if self.rotation not in [-90, None, 90, 180]:
             raise ValueError(f"`rotation` must be in [-90, None, 90, 180] (got {self.rotation})")

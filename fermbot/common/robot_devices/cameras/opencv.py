@@ -3,10 +3,13 @@ import threading
 import numpy as np
 import cv2
 import platform 
+import shutil
 import argparse 
-import pathlib as Path 
-from threading import Thread 
+from pathlib import Path
+from PIL import Image
 
+from threading import Thread 
+import concurrent.futures
 
 from fermbot.common.robot_devices.cameras.configs import OpenCVCameraConfig
 
@@ -31,12 +34,12 @@ class OpenCVCamera:
 
     To find the camera indices of your cameras, you can run our utility script that will be save a few frames for each camera:
     ```bash
-    python lerobot/common/robot_devices/cameras/redis_camera.py --images-dir outputs/images_from_cameras
+    python fermbot/common/robot_devices/cameras/redis_camera.py --images-dir outputs/images_from_cameras
     ```
 
     Example of usage:
     ```python
-    from lerobot.common.robot_devices.cameras.configs import OpenCVCameraConfig
+    from fermbot.common.robot_devices.cameras.configs import OpenCVCameraConfig
 
     config = OpenCVCameraConfig(camera_index=1)
     camera = OpenCVCamera(config)
@@ -101,7 +104,7 @@ class OpenCVCamera:
 
         # Ensure the publisher is running before trying to connect 
         usb_camera.ensure_publisher() 
-        time.sleep(8.0)
+        time.sleep(5.0)
 
         max_retries = 40
         retry_delay = 0.5
@@ -122,20 +125,20 @@ class OpenCVCamera:
                 )
             
         # Test that we can read an image
-            img = usb_camera.get_image(self.camera_index)
-            if img is None:
-                raise OSError(f"Can't capture color image from camera {self.camera_index}.")
-                
-            # Set is_connected to True after successful connection
-            self.is_connected = True
+        img = usb_camera.get_image(self.camera_index)
+        if img is None:
+            raise OSError(f"Can't capture color image from camera {self.camera_index}.")
             
-            # Get actual camera properties from the image
-            h, w, _ = img.shape
-            self.capture_height = h
-            self.capture_width = w
-            
-            # Use the config FPS or default to 30
-            self.fps = self.config.fps if self.config.fps is not None else 30
+        # Set is_connected to True after successful connection
+        self.is_connected = True
+        
+        # Get actual camera properties from the image
+        h, w, _ = img.shape
+        self.capture_height = h
+        self.capture_width = w
+        
+        # Use the config FPS or default to 30
+        self.fps = self.config.fps if self.config.fps is not None else 30
 
 
     def read(self, temporary_color_mode: str | None = None) -> np.ndarray:
@@ -151,11 +154,11 @@ class OpenCVCamera:
                 f"OpenCVCamera({self.camera_index}) is not connected. Try running `camera.connect()` first."
             )
         
-        start_time = time.perf_counter
+        start_time = time.perf_counter()
 
         color_image = usb_camera.get_fermbot_image(camera_index=self.camera_index,
-                                                    width=self.capture_width,
-                                                    height=self.capture_height)
+                                                    width=self.width,
+                                                    height=self.height)
         
         if color_image is None:
             raise OSError(f"Can't capture color image from camera {self.camera_index}.")
@@ -205,17 +208,185 @@ class OpenCVCamera:
     def async_read(self):
         """
         None-blocking version of read(). Starts a background thread if not already running. 
-        Returns the most recent frame captured by the background thread"""
+        Returns the most recent frame captured by the background thread.
+        """
 
+        if not self.is_connected:
+            raise RobotDeviceNotConnectedError(
+                f"OpenCVCamera({self.camera_index}) is not connected. Try running `camera.connect()`"
+            )
         
+        if self.thread is None:
+            self.stop_event = threading.Event() 
+            self.thread = Thread(target=self.read_loop, args=())
+            self.thread.daemon = True 
+            self.thread.start() 
 
-
-
+        num_tries = 0 
+        while True:
+            if self.color_image is not None:
+                return self.color_image
+                
+            time.sleep(1 / self.fps)
+            num_tries += 1
+            if num_tries > self.fps * 2:
+                raise TimeoutError("Timed out waiting for async_read() to start.")
             
-        
 
+    def disconnect(self):
+        """Disconnect from the camera."""
+        if not self.is_connected:
+            raise RobotDeviceNotConnectedError(
+                f"OpenCVCamera({self.camera_index}) is not connected. Try running `camera.connect()` first."
+            )
+            
+        if self.thread is not None:
+            self.stop_event.set()
+            self.thread.join()  # wait for the thread to finish
+            self.thread = None
+            self.stop_event = None
+            
+        self.is_connected = False
 
+    def __del__(self):
+        """Clean up resources when the object is garbage collected."""
+        if getattr(self, "is_connected", False):
+            self.disconnect()
 
-
+def find_cameras():
+    """
+    Find all available cameras and return their information.
+    """
+    cameras = []
     
+    for camera_index in usb_camera.get_active_usbcams():
+        camera_data = usb_camera.get_usbcam_data(camera_index)
+        cameras.append({
+            "index": camera_index,
+            "data": camera_data
+        })
+    
+    return cameras
 
+def save_image(img_array, camera_index, frame_index, images_dir):
+    img = Image.fromarray(img_array)
+    path = images_dir / f"camera_{camera_index:02d}_frame_{frame_index:06d}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(str(path), quality=100)
+
+
+def save_images_from_cameras(
+        images_dir: Path, 
+        camera_ids: list | None = None, 
+        fps=None, 
+        width=None, 
+        height=None, 
+        record_time_s=2,
+        mock=False 
+):
+    """
+    Initializes all the cameras and saves images to the directory. Useful to visually identify the camera 
+    associated to a given camera index.
+    """
+
+    if camera_ids is None or len(camera_ids) == 0:
+        camera_infos = find_cameras()
+        camera_ids = [cam["index"] for cam in camera_infos]
+
+    print("Connecting Cameras")
+
+    cameras = []
+    for cam_idx in camera_ids:
+        config = OpenCVCameraConfig(camera_index=cam_idx, fps=fps, width=width, height=height, mock=mock)
+        camera = OpenCVCamera(config)
+        camera.connect()
+        print(
+            f"OpenCVCamera({camera.camera_index}, fps={camera.fps}, width={camera.capture_width}, "
+            f"height={camera.capture_height}, color_mode={camera.color_mode})"
+        )
+        cameras.append(camera)
+
+    images_dir = Path(images_dir)
+    if images_dir.exists():
+        shutil.rmtree(
+            images_dir,
+        )
+    images_dir.mkdir(parents=True, exist_ok = True)
+
+    print(f"Saving images to {images_dir}")
+    frame_index = 0
+    start_time = time.perf_counter() 
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        while True:
+            now = time.perf_counter() 
+
+            for camera in cameras:
+                image = camera.read() if fps is None else camera.async_read()
+
+                executor.submit(
+                    save_image,
+                    image,
+                    camera.camera_index,
+                    frame_index,
+                    images_dir,
+                )
+
+            if fps is not None:
+                dt_s = time.perf_counter() - now
+                busy_wait(1 / fps - dt_s)
+
+            print(f"Frame: {frame_index:04d}\tLatency (ms): {(time.perf_counter() - now) * 1000:.2f}")
+
+            if time.perf_counter() - start_time > record_time_s:
+                break
+
+            frame_index += 1
+
+    print(f"Images have been saved to {images_dir}")
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Save a few frames using `OpenCVCamera` for all cameras connected to the computer, or a selected subset."
+    )
+    parser.add_argument(
+        "--camera-ids",
+        type=int,
+        nargs="*",
+        default=None,
+        help="List of camera indices used to instantiate the `OpenCVCamera`. If not provided, find and use all available camera indices.",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        help="Set the number of frames recorded per seconds for all cameras. If not provided, use the default fps of each camera.",
+    )
+    parser.add_argument(
+        "--width",
+        type=int,
+        default=640,
+        help="Set the width for all cameras. If not provided, use the default width of each camera.",
+    )
+    parser.add_argument(
+        "--height",
+        type=int,
+        default=480,
+        help="Set the height for all cameras. If not provided, use the default height of each camera.",
+    )
+    parser.add_argument(
+        "--images-dir",
+        type=Path,
+        default="outputs/images_from_opencv_cameras",
+        help="Set directory to save a few frames for each camera.",
+    )
+    parser.add_argument(
+        "--record-time-s",
+        type=float,
+        default=4.0,
+        help="Set the number of seconds used to record the frames. By default, 2 seconds.",
+    )
+    args = parser.parse_args()
+    save_images_from_cameras(**vars(args))
