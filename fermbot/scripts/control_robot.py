@@ -6,4 +6,5 @@ from pprint import pformat
 
 import rerun as rr 
 
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
+from fermbot.common.datasets.fermbot_dataset import LeRobotDataset
+from fermbot.common.policies.factory import make_policy 
