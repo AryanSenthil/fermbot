@@ -30,7 +30,7 @@ def ensure_publisher():
         if lock_acquired:
             print("No usbcam publisher running. Starting publisher automatically.")
             # Spawn the publisher process in the background
-            subprocess.Popen(["python", "-m", "usb_camera.publisher"])
+            subprocess.Popen(["python", "-m", "fermia_camera.usb_camera.publisher"])
             # Allow a moment for the publisher to initialize
             time.sleep(2)
 

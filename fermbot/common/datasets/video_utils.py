@@ -171,7 +171,7 @@ def decode_video_frames_torchcodec(
     """
 
     if importlib.util.find_spec("torchcodec"):
-        from torchcodec.decoders import VideoDecoder
+        from torchcodec.decoders import VideoDecoder # type: ignore
     else:
         raise ImportError("torchcodec is required but not available.")
 

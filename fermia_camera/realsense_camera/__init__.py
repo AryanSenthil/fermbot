@@ -41,7 +41,7 @@ def ensure_publisher():
         if lock_acquired:
             print("No publisher running. Starting publisher automatically.")
             # Spawn the publisher process in the background
-            subprocess.Popen(["python", "-m", "realsense_camera.publisher"])
+            subprocess.Popen(["python", "-m", "fermia_camera.realsense_camera.publisher"])
             # Allow a moment for the publisher to initialize
             time.sleep(2)
 

@@ -42,3 +42,4 @@ pytest-mock
 langgraph 
 gunicorn
 streamlit
+torchcodec

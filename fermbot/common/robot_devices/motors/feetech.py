@@ -1,23 +1,22 @@
-import enum 
-import logging 
+import enum
+import logging
 import math
 import time
-import traceback 
-from copy import deepcopy 
+import traceback
+from copy import deepcopy
 
-import numpy as np 
-import tqdm 
+import numpy as np
+import tqdm
 
 from fermbot.common.robot_devices.motors.configs import FeetechMotorsBusConfig
 from fermbot.common.robot_devices.utils import RobotDeviceAlreadyConnectedError, RobotDeviceNotConnectedError
-from fermbot.common.utils.utils import capture_timestamp_utc 
+from fermbot.common.utils.utils import capture_timestamp_utc
 
-PROTOCOL_VERSION = 0 
-BAUDRATE = 1_000_000 # communication speed between the controller and the servo motors over the serial interface
+PROTOCOL_VERSION = 0
+BAUDRATE = 1_000_000
 TIMEOUT_MS = 1000
 
-MAX_ID_RANGE = 252 
-
+MAX_ID_RANGE = 252
 
 # The following bounds define the lower and upper joints range (after calibration).
 # For joints in degree (i.e. revolute joints), their nominal range is [-180, 180] degrees
@@ -34,6 +33,7 @@ LOWER_BOUND_LINEAR = -10
 UPPER_BOUND_LINEAR = 110
 
 HALF_TURN_DEGREE = 180
+
 
 # See this link for STS3215 Memory Table:
 # https://docs.google.com/spreadsheets/d/1GVs7W1VS1PqdhA1nW-abeyAHhTUxKUdR/edit?usp=sharing&ouid=116566590112741600240&rtpof=true&sd=true
@@ -199,12 +199,12 @@ def assert_same_address(model_ctrl_table, motor_models, data_name):
 
     if len(set(all_addr)) != 1:
         raise NotImplementedError(
-            f"At least two motor models use a different address for `data_name`='{data_name}' ({list(zip(motor_models, all_addr, strict=False))}). Contact a LeRobot maintainer."
+            f"At least two motor models use a different address for `data_name`='{data_name}' ({list(zip(motor_models, all_addr, strict=False))}). Contact a fermbot maintainer."
         )
 
     if len(set(all_bytes)) != 1:
         raise NotImplementedError(
-            f"At least two motor models use a different bytes representation for `data_name`='{data_name}' ({list(zip(motor_models, all_bytes, strict=False))}). Contact a LeRobot maintainer."
+            f"At least two motor models use a different bytes representation for `data_name`='{data_name}' ({list(zip(motor_models, all_bytes, strict=False))}). Contact a fermbot maintainer."
         )
 
 
@@ -239,7 +239,7 @@ class FeetechMotorsBus:
     A FeetechMotorsBus instance requires a port (e.g. `FeetechMotorsBus(port="/dev/tty.usbmodem575E0031751"`)).
     To find the port, you can run our utility script:
     ```bash
-    python lerobot/scripts/find_motors_bus_port.py
+    python fermbot/scripts/find_motors_bus_port.py
     >>> Finding all available ports for the MotorsBus.
     >>> ['/dev/tty.usbmodem575E0032081', '/dev/tty.usbmodem575E0031751']
     >>> Remove the usb cable from your FeetechMotorsBus and press Enter when done.
@@ -312,7 +312,7 @@ class FeetechMotorsBus:
         except Exception:
             traceback.print_exc()
             print(
-                "\nTry running `python lerobot/scripts/find_motors_bus_port.py` to make sure you are using the correct port.\n"
+                "\nTry running `python fermbot/scripts/find_motors_bus_port.py` to make sure you are using the correct port.\n"
             )
             raise
 
@@ -452,7 +452,7 @@ class FeetechMotorsBus:
                         f"with a maximum range of [{LOWER_BOUND_DEGREE}, {UPPER_BOUND_DEGREE}] degrees to account for joints that can rotate a bit more, "
                         f"but present value is {values[i]} degree. "
                         "This might be due to a cable connection issue creating an artificial 360 degrees jump in motor values. "
-                        "You need to recalibrate by running: `python lerobot/scripts/control_robot.py calibrate`"
+                        "You need to recalibrate by running: `python fermbot/scripts/control_robot.py calibrate`"
                     )
 
             elif CalibrationMode[calib_mode] == CalibrationMode.LINEAR:
@@ -470,7 +470,7 @@ class FeetechMotorsBus:
                         f"with a maximum range of [{LOWER_BOUND_LINEAR}, {UPPER_BOUND_LINEAR}] % to account for some imprecision during calibration, "
                         f"but present value is {values[i]} %. "
                         "This might be due to a cable connection issue creating an artificial jump in motor values. "
-                        "You need to recalibrate by running: `python lerobot/scripts/control_robot.py calibrate`"
+                        "You need to recalibrate by running: `python fermbot/scripts/control_robot.py calibrate`"
                     )
 
         return values
@@ -859,6 +859,7 @@ class FeetechMotorsBus:
         delta_ts_name = get_log_name("delta_timestamp_s", "write", data_name, motor_names)
         self.logs[delta_ts_name] = time.perf_counter() - start_time
 
+        # TODO(rcadene): should we log the time before sending the write command?
         # log the utc time when the write has been completed
         ts_utc_name = get_log_name("timestamp_utc", "write", data_name, motor_names)
         self.logs[ts_utc_name] = capture_timestamp_utc()

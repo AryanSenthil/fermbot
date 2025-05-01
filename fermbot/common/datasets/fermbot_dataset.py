@@ -581,8 +581,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
         dataset will be downloaded. Thanks to the behavior of snapshot_download, if the files are already present
         in 'local_dir', they won't be downloaded again.
         """
-        # TODO(rcadene, aliberts): implement faster transfer
-        # https://huggingface.co/docs/huggingface_hub/en/guides/download#faster-downloads
         files = None
         ignore_patterns = None if download_videos else "videos/"
         if self.episodes is not None:

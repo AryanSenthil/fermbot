@@ -1,50 +1,47 @@
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Contains logic to instantiate a robot, read information from its motors and cameras,
 and send orders to its motors.
 """
+# TODO(rcadene, aliberts): reorganize the codebase into one file per robot, with the associated
+# calibration procedure, to make it easy for people to add their own robot.
 
-import json 
-import logging 
-import time 
-import warnings 
-import pathlib as Path 
-import numpy as np 
-import torch 
+import json
+import logging
+import time
+import warnings
+from pathlib import Path
 
+import numpy as np
+import torch
 
 from fermbot.common.robot_devices.cameras.utils import make_cameras_from_configs
 from fermbot.common.robot_devices.motors.utils import MotorsBus, make_motors_buses_from_configs
-from fermbot.common.robot_devices.robots.configs import ManipulatorRobotConfig 
+from fermbot.common.robot_devices.robots.configs import ManipulatorRobotConfig
 from fermbot.common.robot_devices.robots.utils import get_arm_id
 from fermbot.common.robot_devices.utils import RobotDeviceAlreadyConnectedError, RobotDeviceNotConnectedError
 
+
 def ensure_safe_goal_position(
-        goal_pos: torch.Tensor, present_pos: torch.Tensor, max_relative_target: float | list[float]
+    goal_pos: torch.Tensor, present_pos: torch.Tensor, max_relative_target: float | list[float]
 ):
-    """
-    Inputs
-    goal_pos: A PyTorch tensor representing the target position you want the joint(s) to move to
-    present_pos: A PyTorch tensor representing the current position of the joint(s)
-    max_relative_target: Either a single float or a list of floats specifying the maximum allowed movement in one step (for each joint if it's a list)
-
-    What it does
-
-    Calculates the difference between the goal position and current position: diff = goal_pos - present_pos
-    Converts max_relative_target to a tensor for vector operations
-    Clamps the difference to be within the allowed range:
-
-    No larger than max_relative_target in the positive direction
-    No smaller than -max_relative_target in the negative direction
-
-
-    Calculates a safe goal position by adding the clamped difference to the current position
-    If the safe goal position differs from the original requested position, it logs a warning
-    Returns the safe goal position
-    """
-    # Cap relative action targe magnitude for safety 
+    # Cap relative action target magnitude for safety.
     diff = goal_pos - present_pos
     max_relative_target = torch.tensor(max_relative_target)
     safe_diff = torch.minimum(diff, max_relative_target)
-    safe_diff = torch.minimum(safe_diff, -max_relative_target)
+    safe_diff = torch.maximum(safe_diff, -max_relative_target)
     safe_goal_pos = present_pos + safe_diff
 
     if not torch.allclose(goal_pos, safe_goal_pos):
@@ -58,6 +55,7 @@ def ensure_safe_goal_position(
 
 
 class ManipulatorRobot:
+    # TODO(rcadene): Implement force feedback
     """This class allows to control any manipulator robot of various number of motors.
 
     Non exhaustive list of robots:
@@ -223,31 +221,31 @@ class ManipulatorRobot:
             arm_id = get_arm_id(name, "leader")
             available_arms.append(arm_id)
         return available_arms
-    
 
     def connect(self):
         if self.is_connected:
             raise RobotDeviceAlreadyConnectedError(
-                "ManipulatorRobot is already connected."
+                "ManipulatorRobot is already connected. Do not run `robot.connect()` twice."
             )
-        
+
         if not self.leader_arms and not self.follower_arms and not self.cameras:
             raise ValueError(
-                "ManipulatorRobot doesn't have any device to connect."
+                "ManipulatorRobot doesn't have any device to connect. See example of usage in docstring of the class."
             )
-        
 
-        # Connect the arms 
+        # Connect the arms
         for name in self.follower_arms:
             print(f"Connecting {name} follower arm.")
             self.follower_arms[name].connect()
         for name in self.leader_arms:
             print(f"Connecting {name} leader arm.")
-            self.leader_arms[name].connect() 
+            self.leader_arms[name].connect()
 
-        if self.robot_type in ["so100"]:
+        if self.robot_type in ["so100", "so101", "moss", "lekiwi"]:
             from fermbot.common.robot_devices.motors.feetech import TorqueMode
 
+        # We assume that at connection time, arms are in a rest position, and torque can
+        # be safely disabled to run calibration and/or set robot preset configurations.
         for name in self.follower_arms:
             self.follower_arms[name].write("Torque_Enable", TorqueMode.DISABLED.value)
         for name in self.leader_arms:
@@ -255,35 +253,46 @@ class ManipulatorRobot:
 
         self.activate_calibration()
 
-        if self.robot_type in ["so100"]:
-            self.set_so100_robot_present()
-        
-         # Enable torque on all motors of the follower arms
+        # Set robot preset (e.g. torque in leader gripper for Koch v1.1)
+        if self.robot_type in ["koch", "koch_bimanual"]:
+            self.set_koch_robot_preset()
+        elif self.robot_type == "aloha":
+            self.set_aloha_robot_preset()
+        elif self.robot_type in ["so100", "so101", "moss", "lekiwi"]:
+            self.set_so100_robot_preset()
+
+        # Enable torque on all motors of the follower arms
         for name in self.follower_arms:
             print(f"Activating torque on {name} follower arm.")
             self.follower_arms[name].write("Torque_Enable", 1)
 
         if self.config.gripper_open_degree is not None:
+            if self.robot_type not in ["koch", "koch_bimanual"]:
+                raise NotImplementedError(
+                    f"{self.robot_type} does not support position AND current control in the handle, which is require to set the gripper open."
+                )
+            # Set the leader arm in torque mode with the gripper motor set to an angle. This makes it possible
+            # to squeeze the gripper and have it spring back to an open position on its own.
             for name in self.leader_arms:
                 self.leader_arms[name].write("Torque_Enable", 1, "gripper")
                 self.leader_arms[name].write("Goal_Position", self.config.gripper_open_degree, "gripper")
 
-        # check both arms can be read 
-        for name in self.follower_arms: 
+        # Check both arms can be read
+        for name in self.follower_arms:
             self.follower_arms[name].read("Present_Position")
         for name in self.leader_arms:
-            self.leader_arms[name].read("Present Position")
+            self.leader_arms[name].read("Present_Position")
 
         # Connect the cameras
         for name in self.cameras:
-            self.cameras[name].connect() 
+            self.cameras[name].connect()
 
-        self.is_connected = True 
-    
+        self.is_connected = True
+
     def activate_calibration(self):
-        """
-        After calibration all motors function in human interpretable ranges. 
-        Rotations are expressed in degrees in nominal ragne of [-180, 180]
+        """After calibration all motors function in human interpretable ranges.
+        Rotations are expressed in degrees in nominal range of [-180, 180],
+        and linear motions (like gripper of Aloha) in nominal range of [0, 100].
         """
 
         def load_or_run_calibration_(name, arm, arm_type):
@@ -293,24 +302,24 @@ class ManipulatorRobot:
             if arm_calib_path.exists():
                 with open(arm_calib_path) as f:
                     calibration = json.load(f)
-
             else:
-                print(f"Mission calibration file `{arm_calib_path}`")
+                # TODO(rcadene): display a warning in __init__ if calibration file not available
+                print(f"Missing calibration file '{arm_calib_path}'")
 
-                if self.robot_type in ["so100"]:
+                if self.robot_type in ["so100", "so101", "moss", "lekiwi"]:
                     from fermbot.common.robot_devices.robots.feetech_calibration import (
-                        run_arm_manual_calibration
+                        run_arm_manual_calibration,
                     )
 
                     calibration = run_arm_manual_calibration(arm, self.robot_type, name, arm_type)
 
-                print(f"Calibration is done! Saving calibration file '{arm_calib_path}`")
+                print(f"Calibration is done! Saving calibration file '{arm_calib_path}'")
                 arm_calib_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(arm_calib_path, "w") as f:
                     json.dump(calibration, f)
 
             return calibration
-        
+
         for name, arm in self.follower_arms.items():
             calibration = load_or_run_calibration_(name, arm, "follower")
             arm.set_calibration(calibration)
@@ -374,6 +383,8 @@ class ManipulatorRobot:
         # Early exit when recording data is not requested
         if not record_data:
             return
+
+        # TODO(rcadene): Add velocity and other info
         # Read follower position
         follower_pos = {}
         for name in self.follower_arms:
@@ -494,6 +505,7 @@ class ManipulatorRobot:
 
     def print_logs(self):
         pass
+        # TODO(aliberts): move robot-specific logs logic here
 
     def disconnect(self):
         if not self.is_connected:
@@ -515,6 +527,3 @@ class ManipulatorRobot:
     def __del__(self):
         if getattr(self, "is_connected", False):
             self.disconnect()
-
-
-
