@@ -279,8 +279,242 @@ class ManipulatorRobot:
             self.cameras[name].connect() 
 
         self.is_connected = True 
+    
+    def activate_calibration(self):
+        """
+        After calibration all motors function in human interpretable ranges. 
+        Rotations are expressed in degrees in nominal ragne of [-180, 180]
+        """
 
+        def load_or_run_calibration_(name, arm, arm_type):
+            arm_id = get_arm_id(name, arm_type)
+            arm_calib_path = self.calibration_dir / f"{arm_id}.json"
+
+            if arm_calib_path.exists():
+                with open(arm_calib_path) as f:
+                    calibration = json.load(f)
+
+            else:
+                print(f"Mission calibration file `{arm_calib_path}`")
+
+                if self.robot_type in ["so100"]:
+                    from fermbot.common.robot_devices.robots.feetech_calibration import (
+                        run_arm_manual_calibration
+                    )
+
+                    calibration = run_arm_manual_calibration(arm, self.robot_type, name, arm_type)
+
+                print(f"Calibration is done! Saving calibration file '{arm_calib_path}`")
+                arm_calib_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(arm_calib_path, "w") as f:
+                    json.dump(calibration, f)
+
+            return calibration
         
+        for name, arm in self.follower_arms.items():
+            calibration = load_or_run_calibration_(name, arm, "follower")
+            arm.set_calibration(calibration)
+        for name, arm in self.leader_arms.items():
+            calibration = load_or_run_calibration_(name, arm, "leader")
+            arm.set_calibration(calibration)
+
+    def set_so100_robot_preset(self):
+        for name in self.follower_arms:
+            # Mode=0 for Position Control
+            self.follower_arms[name].write("Mode", 0)
+            # Set P_Coefficient to lower value to avoid shakiness (Default is 32)
+            self.follower_arms[name].write("P_Coefficient", 16)
+            # Set I_Coefficient and D_Coefficient to default value 0 and 32
+            self.follower_arms[name].write("I_Coefficient", 0)
+            self.follower_arms[name].write("D_Coefficient", 32)
+            # Close the write lock so that Maximum_Acceleration gets written to EPROM address,
+            # which is mandatory for Maximum_Acceleration to take effect after rebooting.
+            self.follower_arms[name].write("Lock", 0)
+            # Set Maximum_Acceleration to 254 to speedup acceleration and deceleration of
+            # the motors. Note: this configuration is not in the official STS3215 Memory Table
+            self.follower_arms[name].write("Maximum_Acceleration", 254)
+            self.follower_arms[name].write("Acceleration", 254)
+
+    def teleop_step(
+        self, record_data=False
+    ) -> None | tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        if not self.is_connected:
+            raise RobotDeviceNotConnectedError(
+                "ManipulatorRobot is not connected. You need to run `robot.connect()`."
+            )
+
+        # Prepare to assign the position of the leader to the follower
+        leader_pos = {}
+        for name in self.leader_arms:
+            before_lread_t = time.perf_counter()
+            leader_pos[name] = self.leader_arms[name].read("Present_Position")
+            leader_pos[name] = torch.from_numpy(leader_pos[name])
+            self.logs[f"read_leader_{name}_pos_dt_s"] = time.perf_counter() - before_lread_t
+
+        # Send goal position to the follower
+        follower_goal_pos = {}
+        for name in self.follower_arms:
+            before_fwrite_t = time.perf_counter()
+            goal_pos = leader_pos[name]
+
+            # Cap goal position when too far away from present position.
+            # Slower fps expected due to reading from the follower.
+            if self.config.max_relative_target is not None:
+                present_pos = self.follower_arms[name].read("Present_Position")
+                present_pos = torch.from_numpy(present_pos)
+                goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
+
+            # Used when record_data=True
+            follower_goal_pos[name] = goal_pos
+
+            goal_pos = goal_pos.numpy().astype(np.float32)
+            self.follower_arms[name].write("Goal_Position", goal_pos)
+            self.logs[f"write_follower_{name}_goal_pos_dt_s"] = time.perf_counter() - before_fwrite_t
+
+        # Early exit when recording data is not requested
+        if not record_data:
+            return
+        # Read follower position
+        follower_pos = {}
+        for name in self.follower_arms:
+            before_fread_t = time.perf_counter()
+            follower_pos[name] = self.follower_arms[name].read("Present_Position")
+            follower_pos[name] = torch.from_numpy(follower_pos[name])
+            self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_fread_t
+
+        # Create state by concatenating follower current position
+        state = []
+        for name in self.follower_arms:
+            if name in follower_pos:
+                state.append(follower_pos[name])
+        state = torch.cat(state)
+
+        # Create action by concatenating follower goal position
+        action = []
+        for name in self.follower_arms:
+            if name in follower_goal_pos:
+                action.append(follower_goal_pos[name])
+        action = torch.cat(action)
+
+        # Capture images from cameras
+        images = {}
+        for name in self.cameras:
+            before_camread_t = time.perf_counter()
+            images[name] = self.cameras[name].async_read()
+            images[name] = torch.from_numpy(images[name])
+            self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
+            self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
+
+        # Populate output dictionaries
+        obs_dict, action_dict = {}, {}
+        obs_dict["observation.state"] = state
+        action_dict["action"] = action
+        for name in self.cameras:
+            obs_dict[f"observation.images.{name}"] = images[name]
+
+        return obs_dict, action_dict
+
+    def capture_observation(self):
+        """The returned observations do not have a batch dimension."""
+        if not self.is_connected:
+            raise RobotDeviceNotConnectedError(
+                "ManipulatorRobot is not connected. You need to run `robot.connect()`."
+            )
+
+        # Read follower position
+        follower_pos = {}
+        for name in self.follower_arms:
+            before_fread_t = time.perf_counter()
+            follower_pos[name] = self.follower_arms[name].read("Present_Position")
+            follower_pos[name] = torch.from_numpy(follower_pos[name])
+            self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_fread_t
+
+        # Create state by concatenating follower current position
+        state = []
+        for name in self.follower_arms:
+            if name in follower_pos:
+                state.append(follower_pos[name])
+        state = torch.cat(state)
+
+        # Capture images from cameras
+        images = {}
+        for name in self.cameras:
+            before_camread_t = time.perf_counter()
+            images[name] = self.cameras[name].async_read()
+            images[name] = torch.from_numpy(images[name])
+            self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
+            self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
+
+        # Populate output dictionaries and format to pytorch
+        obs_dict = {}
+        obs_dict["observation.state"] = state
+        for name in self.cameras:
+            obs_dict[f"observation.images.{name}"] = images[name]
+        return obs_dict
+
+    def send_action(self, action: torch.Tensor) -> torch.Tensor:
+        """Command the follower arms to move to a target joint configuration.
+
+        The relative action magnitude may be clipped depending on the configuration parameter
+        `max_relative_target`. In this case, the action sent differs from original action.
+        Thus, this function always returns the action actually sent.
+
+        Args:
+            action: tensor containing the concatenated goal positions for the follower arms.
+        """
+        if not self.is_connected:
+            raise RobotDeviceNotConnectedError(
+                "ManipulatorRobot is not connected. You need to run `robot.connect()`."
+            )
+
+        from_idx = 0
+        to_idx = 0
+        action_sent = []
+        for name in self.follower_arms:
+            # Get goal position of each follower arm by splitting the action vector
+            to_idx += len(self.follower_arms[name].motor_names)
+            goal_pos = action[from_idx:to_idx]
+            from_idx = to_idx
+
+            # Cap goal position when too far away from present position.
+            # Slower fps expected due to reading from the follower.
+            if self.config.max_relative_target is not None:
+                present_pos = self.follower_arms[name].read("Present_Position")
+                present_pos = torch.from_numpy(present_pos)
+                goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
+
+            # Save tensor to concat and return
+            action_sent.append(goal_pos)
+
+            # Send goal position to each follower
+            goal_pos = goal_pos.numpy().astype(np.float32)
+            self.follower_arms[name].write("Goal_Position", goal_pos)
+
+        return torch.cat(action_sent)
+
+    def print_logs(self):
+        pass
+
+    def disconnect(self):
+        if not self.is_connected:
+            raise RobotDeviceNotConnectedError(
+                "ManipulatorRobot is not connected. You need to run `robot.connect()` before disconnecting."
+            )
+
+        for name in self.follower_arms:
+            self.follower_arms[name].disconnect()
+
+        for name in self.leader_arms:
+            self.leader_arms[name].disconnect()
+
+        for name in self.cameras:
+            self.cameras[name].disconnect()
+
+        self.is_connected = False
+
+    def __del__(self):
+        if getattr(self, "is_connected", False):
+            self.disconnect()
 
 
 

@@ -34,3 +34,10 @@ def make_robot_config(robot_type: str, **kwargs) -> RobotConfig:
 def make_robot_from_config(config: RobotConfig):
     if isinstance(config, ManipulatorRobotConfig):
         from fermbot.common.robot_devices.robots.manipulator import ManipulatorRobot
+
+        return ManipulatorRobot(config)
+
+
+def make_robot(robot_type: str, **kwargs) -> Robot:
+    config = make_robot_config(robot_type, **kwargs)
+    return make_robot_from_config(config)
