@@ -1,22 +1,8 @@
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+
 
 """Contains logic to instantiate a robot, read information from its motors and cameras,
 and send orders to its motors.
 """
-# TODO(rcadene, aliberts): reorganize the codebase into one file per robot, with the associated
-# calibration procedure, to make it easy for people to add their own robot.
 
 import json
 import logging
@@ -55,7 +41,6 @@ def ensure_safe_goal_position(
 
 
 class ManipulatorRobot:
-    # TODO(rcadene): Implement force feedback
     """This class allows to control any manipulator robot of various number of motors.
 
     Non exhaustive list of robots:
@@ -303,7 +288,6 @@ class ManipulatorRobot:
                 with open(arm_calib_path) as f:
                     calibration = json.load(f)
             else:
-                # TODO(rcadene): display a warning in __init__ if calibration file not available
                 print(f"Missing calibration file '{arm_calib_path}'")
 
                 if self.robot_type in ["so100", "so101", "moss", "lekiwi"]:
@@ -384,7 +368,6 @@ class ManipulatorRobot:
         if not record_data:
             return
 
-        # TODO(rcadene): Add velocity and other info
         # Read follower position
         follower_pos = {}
         for name in self.follower_arms:
@@ -505,7 +488,6 @@ class ManipulatorRobot:
 
     def print_logs(self):
         pass
-        # TODO(aliberts): move robot-specific logs logic here
 
     def disconnect(self):
         if not self.is_connected:
